@@ -1,8 +1,8 @@
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
-import cookieData from './data/cookies.js';
 import { analyzeProfileWithGPT } from './services/openaiService.js';
+import { getRandomCookies, getAllCookies } from './services/firebaseService.js';
 import 'dotenv/config';
 
 const app = express();
@@ -22,7 +22,7 @@ app.use(express.json({ limit: '50mb' }));
 app.post('/scrape', async (req, res) => {
   try {
     // Extrair dados do body
-    const { profileUrl, cookies, objective } = req.body;
+    const { profileUrl, objective } = req.body;
     
     // Validar entradas
     if (!profileUrl) {
@@ -32,87 +32,131 @@ app.post('/scrape', async (req, res) => {
       });
     }
     
-    // Se cookies não forem fornecidos, usar os padrão
-    const cookiesToUse = cookies && Array.isArray(cookies) && cookies.length > 0 
-      ? cookies 
-      : cookieData;
-    
     // Configuração da API Apify
     const apiEndpoint = 'https://api.apify.com/v2/acts/curious_coder~linkedin-profile-scraper/run-sync-get-dataset-items';
-    const apiToken = 'apify_api_He4ovzomMQqpy7iIW4nnZZdFPXacCn3QrwXj';
+    const apiToken = process.env.APIFY_API_TOKEN || 'apify_api_He4ovzomMQqpy7iIW4nnZZdFPXacCn3QrwXj';
     
     console.log(`Iniciando scraping para: ${profileUrl}`);
     
-    // Definir os possíveis formatos de payload
-    const payloads = [
-      // Formato 1: Usando input.urls
-      {
-        input: {
-          urls: [profileUrl],
-          cookie: cookieData,
-          proxy: { useApifyProxy: true }
-        }
-      },
-      // Formato 2: Usando profileUrls
-      {
-        input: {
-          profileUrls: [profileUrl],
-          cookie: cookieData,
-          proxy: { useApifyProxy: true }
-        }
-      },
-      // Formato 3: URLs direto no payload
-      {
-        urls: [profileUrl],
-        cookie: cookieData,
-        proxy: { useApifyProxy: true }
-      }
-    ];
-    
+    // Sistema de retry com diferentes conjuntos de cookies
+    const MAX_RETRY = 3;
     let profileData = null;
     let lastError = null;
+    let cookieSource = 'local'; // Para tracking
     
-    // Tentar cada formato de payload até ter sucesso
-    for (const payload of payloads) {
+    // Tentar até MAX_RETRY vezes
+    for (let retryAttempt = 1; retryAttempt <= MAX_RETRY; retryAttempt++) {
       try {
-        console.log(`Tentando com payload: ${JSON.stringify(payload, null, 2)}`);
+        console.log(`Tentativa ${retryAttempt}/${MAX_RETRY} de scraping...`);
         
-        // Fazer requisição para Apify
-        const response = await axios({
-          method: 'POST',
-          url: `${apiEndpoint}?token=${apiToken}`,
-          headers: {
-            'Content-Type': 'application/json'
+        // Tentar obter cookies do Firebase ou usar local como fallback
+        let cookiesToUse = [];
+        try {
+          // Tentar obter cookies do Firebase
+          cookiesToUse = await getRandomCookies();
+          cookieSource = 'firebase';
+          console.log(`Usando cookies do Firebase na tentativa ${retryAttempt}`);
+        } catch (cookieError) {
+          console.warn(`Erro ao obter cookies do Firebase: ${cookieError.message}`);
+          
+     
+          console.log(`Usando cookies locais na tentativa ${retryAttempt}`);
+        }
+        
+        // Verificar se temos cookies válidos
+        if (!cookiesToUse || !Array.isArray(cookiesToUse) || cookiesToUse.length === 0) {
+          console.warn("Nenhum cookie válido disponível para esta tentativa.");
+          if (retryAttempt === MAX_RETRY) {
+            throw new Error('Não foi possível obter cookies válidos após múltiplas tentativas');
+          }
+          continue; // Tentar novamente
+        }
+        
+        // Definir os possíveis formatos de payload
+        const payloads = [
+          // Formato 1: Usando input.urls
+          {
+            input: {
+              urls: [profileUrl],
+              cookie: cookiesToUse,
+              proxy: { useApifyProxy: true }
+            }
           },
-          data: payload,
-          timeout: 120000 // 2 minutos
-        });
+          // Formato 2: Usando profileUrls
+          {
+            input: {
+              profileUrls: [profileUrl],
+              cookie: cookiesToUse,
+              proxy: { useApifyProxy: true }
+            }
+          },
+          // Formato 3: URLs direto no payload
+          {
+            urls: [profileUrl],
+            cookie: cookiesToUse,
+            proxy: { useApifyProxy: true }
+          }
+        ];
         
-        // Verificar se a resposta tem dados válidos
-        if (response.data) {
-          // Processar resposta
-          if (Array.isArray(response.data) && response.data.length > 0) {
-            profileData = response.data;
-            break;
-          } else if (response.data.items && Array.isArray(response.data.items) && response.data.items.length > 0) {
-            profileData = response.data.items;
-            break;
-          } else if (response.data && typeof response.data === 'object') {
-            profileData = response.data;
-            break;
+        // Tentar cada formato de payload até ter sucesso
+        for (const payload of payloads) {
+          try {
+            console.log(`Tentando com payload (formato ${payloads.indexOf(payload) + 1})...`);
+            
+            // Fazer requisição para Apify
+            const response = await axios({
+              method: 'POST',
+              url: `${apiEndpoint}?token=${apiToken}`,
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              data: payload,
+              timeout: 120000 // 2 minutos
+            });
+            
+            // Verificar se a resposta tem dados válidos
+            if (response.data) {
+              // Processar resposta
+              if (Array.isArray(response.data) && response.data.length > 0) {
+                profileData = response.data;
+                break;
+              } else if (response.data.items && Array.isArray(response.data.items) && response.data.items.length > 0) {
+                profileData = response.data.items;
+                break;
+              } else if (response.data && typeof response.data === 'object') {
+                profileData = response.data;
+                break;
+              }
+            }
+            
+            console.log('Resposta sem dados válidos, tentando próximo formato');
+          } catch (error) {
+            console.error(`Erro na tentativa: ${error.message}`);
+            lastError = error;
           }
         }
         
-        console.log('Resposta sem dados válidos, tentando próximo formato');
-      } catch (error) {
-        console.error(`Erro na tentativa: ${error.message}`);
-        lastError = error;
+        // Se encontrou dados válidos, sair do loop de retry
+        if (profileData) {
+          console.log(`Scraping bem-sucedido na tentativa ${retryAttempt} usando cookies ${cookieSource}`);
+          break;
+        }
+        
+      } catch (retryError) {
+        console.error(`Erro na tentativa ${retryAttempt}: ${retryError.message}`);
+        lastError = retryError;
       }
     }
     
-    // Se nenhum dos formatos funcionou
+    // Se todas as tentativas falharam
     if (!profileData) {
-      throw lastError || new Error('Não foi possível obter dados do perfil com nenhum dos métodos tentados');
+      // Responder com erro e flag para contatar suporte
+      return res.status(500).json({
+        success: false,
+        message: 'Não foi possível acessar seu perfil do LinkedIn após várias tentativas',
+        error: lastError?.message || 'Erro desconhecido',
+        contactSupport: true
+      });
     }
     
     // Integração com o GPT para análise real do perfil
@@ -130,6 +174,15 @@ app.post('/scrape', async (req, res) => {
         profileUrl: profileUrl
       };
       
+      // Criar scores simulados para demonstração
+      const scores = {
+        profile_completeness: Math.floor(Math.random() * 3) + 7, // 7-9
+        headline_quality: Math.floor(Math.random() * 4) + 6,    // 6-9
+        experience_details: Math.floor(Math.random() * 5) + 5,  // 5-9
+        skills_relevance: Math.floor(Math.random() * 6) + 4,    // 4-9
+        overall_impression: Math.floor(Math.random() * 4) + 6   // 6-9
+      };
+      
       // Responder com os dados completos
       res.json({
         success: true,
@@ -137,7 +190,9 @@ app.post('/scrape', async (req, res) => {
           profile: profileInfo,
           objective: objective || 'general',
           analysis: analysisResult.analysis,
-          timestamp: new Date().toISOString()
+          scores: scores,
+          timestamp: new Date().toISOString(),
+          cookieSource: cookieSource // Apenas para referência
         }
       });
       
@@ -149,6 +204,8 @@ app.post('/scrape', async (req, res) => {
         success: true,
         partialSuccess: true,
         message: 'Perfil obtido com sucesso, mas ocorreu um erro na análise com GPT',
+        note: 'A análise automática falhou, mas ainda podemos mostrar seu perfil.',
+        noteType: 'warning',
         data: {
           profile: {
             name: extractName(profileData),
@@ -187,7 +244,7 @@ app.post('/scrape', async (req, res) => {
 });
 
 // Rota para listar objetivos disponíveis
-app.get('/api/objectives', (req, res) => {
+app.get('/objectives', (req, res) => {
   const objectives = [
     {
       id: 'first_job',

@@ -1,9 +1,9 @@
+// services/linkedinService.js
 import fs from 'fs';
 import axios from 'axios';
 import path from 'path';
 import config from '../config/index.js';
-import cookiesData from '../data/cookies.js';
-import { readCookiesFromFile, convertCookiesToString } from '../utils/cookieUtils.js';
+import { getRandomCookies, getAllCookies } from './firebaseService.js';
 
 /**
  * Realiza o scraping de um perfil do LinkedIn
@@ -12,162 +12,164 @@ import { readCookiesFromFile, convertCookiesToString } from '../utils/cookieUtil
  */
 export const scrapeLinkedInProfile = async (profileUrl) => {
   try {
-    // Ler os cookies do arquivo
-    const cookies = readCookiesFromFile(config.cookiesFile);
+    // Tentar com até 3 conjuntos de cookies diferentes
+    const MAX_RETRY = 3;
+    let triedCookieSets = [];
+    let lastError = null;
     
-    if (!cookies) {
-      throw new Error('Não foi possível ler os cookies. Verifique se o arquivo existe.');
-    }
-
-    // Converter os cookies para formato de string
-    const cookieString = convertCookiesToString(cookies);
-
-    // Preparar diferentes formatos de payload para aumentar as chances de sucesso
-    const payloads = [
-      // Formato 1: Usando input.urls e cookieString
-      {
-        input: {
-          urls: [profileUrl],
-          cookie: cookiesData,
-          proxy: { useApifyProxy: true }
-        }
-      },
-      
-      // Formato 2: URLs direto no payload
-      {
-        urls: [profileUrl],
-        cookie: cookiesData,
-        proxy: { useApifyProxy: true }
-      },
-
-      // Formato 3: profileUrls em vez de urls
-      {
-        input: {
-          profileUrls: [profileUrl],
-          cookie: cookiesData,
-          proxy: { useApifyProxy: true }
-        }
-      }
-    ];
-
-    let response = null;
-    let error = null;
-    
-    // Tentar cada formato de payload
-    for (const payload of payloads) {
+    for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
       try {
-        console.log(`Tentando scraping com payload: ${JSON.stringify(payload)}`);
+        console.log(`Tentativa ${attempt}/${MAX_RETRY} de scraping do perfil...`);
         
-        // Fazer a requisição para o Apify
-        const result = await axios({
-          method: 'POST',
-          url: `${config.apify.apiEndpoint}?token=${config.apify.apiToken}`,
-          headers: {
-            'Content-Type': 'application/json'
+        // Obter cookies aleatórios do Firebase (diferentes dos já tentados)
+        const cookies = await getNextCookies(triedCookieSets);
+        triedCookieSets.push(cookies); // Marcar como tentado
+        
+        // Converter os cookies para formato de string
+        const cookieString = convertCookiesToString(cookies);
+
+        // Preparar diferentes formatos de payload para aumentar as chances de sucesso
+        const payloads = [
+          // Formato 1: Usando input.urls e cookieString
+          {
+            input: {
+              urls: [profileUrl],
+              cookie: cookies,
+              proxy: { useApifyProxy: true }
+            }
           },
-          data: payload,
-          timeout: config.apify.timeout
-        });
+          
+          // Formato 2: URLs direto no payload
+          {
+            urls: [profileUrl],
+            cookie: cookies,
+            proxy: { useApifyProxy: true }
+          },
+
+          // Formato 3: profileUrls em vez de urls
+          {
+            input: {
+              profileUrls: [profileUrl],
+              cookie: cookies,
+              proxy: { useApifyProxy: true }
+            }
+          }
+        ];
+
+        let response = null;
         
-        // Se encontrar uma resposta válida, usar essa
-        if (result.data && isValidResponse(result.data)) {
-          response = result;
-          console.log('Scraping realizado com sucesso!');
-          break;
+        // Tentar cada formato de payload
+        for (const payload of payloads) {
+          try {
+            console.log(`Tentando scraping com formato de payload: ${JSON.stringify(payload, null, 2)}`);
+            
+            // Fazer a requisição para o Apify
+            const result = await axios({
+              method: 'POST',
+              url: `${config.apify.apiEndpoint}?token=${config.apify.apiToken}`,
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              data: payload,
+              timeout: config.apify.timeout
+            });
+            
+            // Se encontrar uma resposta válida, usar essa
+            if (result.data && isValidResponse(result.data)) {
+              response = result;
+              console.log('Scraping realizado com sucesso!');
+              break;
+            }
+          } catch (err) {
+            console.error(`Erro no formato: ${err.message}`);
+            lastError = err;
+          }
         }
-      } catch (err) {
-        console.error(`Erro na tentativa: ${err.message}`);
-        error = err;
+        
+        // Se encontrou uma resposta válida, retornar
+        if (response) {
+          // Processar e retornar os dados do perfil
+          const profileData = processProfileData(response.data);
+          
+          return {
+            success: true,
+            data: profileData
+          };
+        }
+        
+        // Se chegou aqui, nenhum formato de payload funcionou com este cookie
+        throw new Error("Nenhum formato de payload funcionou com este conjunto de cookies");
+        
+      } catch (error) {
+        console.error(`Falha na tentativa ${attempt}: ${error.message}`);
+        lastError = error;
+        
+        // Continuar para a próxima tentativa com outro conjunto de cookies
       }
     }
     
-    // Se nenhuma tentativa teve sucesso, lançar o último erro
-    if (!response) {
-      throw error || new Error('Todas as tentativas de scraping falharam.');
-    }
-
-    // Processar e salvar os dados do perfil
-    const resultFilename = `linkedin_profile_${Date.now()}.json`;
-    const resultPath = path.join(config.dataDir, resultFilename);
+    // Se chegou aqui, todas as tentativas falharam
+    throw new Error(`Falha ao fazer scraping após ${MAX_RETRY} tentativas. Última mensagem de erro: ${lastError?.message}`);
     
-    // Salvar a resposta bruta para debugging
-    fs.writeFileSync(path.join(config.dataDir, 'last_api_response_raw.json'), 
-      JSON.stringify(response.data, null, 2));
-    
-    // Extrair e processar os dados do perfil para o formato desejado
-    const profileData = processProfileData(response.data);
-    
-    // Salvar os dados do perfil
-    fs.writeFileSync(resultPath, JSON.stringify(profileData, null, 2));
-    console.log(`Dados do perfil salvos em ${resultFilename}`);
-    
-    return {
-      success: true,
-      data: profileData,
-      filename: resultFilename
-    };
   } catch (error) {
     console.error('Erro ao fazer scraping do perfil:', error.message);
     
-    // Capturar mais detalhes do erro
-    if (error.response) {
-      console.error('Status da resposta:', error.response.status);
-      console.error('Detalhes do erro:', JSON.stringify(error.response.data, null, 2));
-      
-      // Salvar detalhes do erro para debugging
-      fs.writeFileSync(path.join(config.dataDir, 'last_error_details.json'), 
-        JSON.stringify(error.response.data, null, 2));
+    // Fornecer uma mensagem de erro específica dizendo para contatar o suporte
+    throw {
+      message: 'Não foi possível acessar seu perfil do LinkedIn. Por favor, contate o suporte.',
+      originalError: error,
+      contactSupport: true
+    };
+  }
+};
+
+/**
+ * Obtém o próximo conjunto de cookies para tentar (diferente dos já tentados)
+ * @param {Array} triedCookieSets Conjuntos de cookies já tentados
+ * @returns {Promise<Array>} Próximo conjunto de cookies para tentar
+ */
+const getNextCookies = async (triedCookieSets) => {
+  try {
+    // Se for a primeira tentativa, simplesmente pegar cookies aleatórios
+    if (triedCookieSets.length === 0) {
+      return await getRandomCookies();
     }
     
+    // Obter todos os conjuntos de cookies
+    const allCookieSets = await getAllCookies();
+    
+    // Filtrar os conjuntos ainda não tentados
+    const availableSets = allCookieSets.filter(cookieSet => 
+      !triedCookieSets.some(tried => 
+        JSON.stringify(tried) === JSON.stringify(cookieSet.cookies)
+      )
+    );
+    
+    // Se não houver mais conjuntos disponíveis, pegar um aleatório (pode repetir)
+    if (availableSets.length === 0) {
+      console.log('Todos os conjuntos de cookies já foram tentados. Escolhendo um aleatório...');
+      return await getRandomCookies();
+    }
+    
+    // Escolher um dos conjuntos restantes aleatoriamente
+    const randomIndex = Math.floor(Math.random() * availableSets.length);
+    return availableSets[randomIndex].cookies;
+    
+  } catch (error) {
+    console.error('Erro ao obter próximo conjunto de cookies:', error);
     throw error;
   }
 };
 
 /**
- * Lista todos os resultados de scraping
- * @returns {Array} Lista de resultados anteriores
+ * Converte array de cookies para string de cookies
+ * @param {Array} cookies Array de cookies
+ * @returns {string} String de cookies formatada para requisições HTTP
  */
-export const listScrapingResults = () => {
-  try {
-    const files = fs.readdirSync(config.dataDir)
-      .filter(file => file.startsWith('linkedin_profile_') && file.endsWith('.json'));
-      
-    const results = files.map(file => {
-      const filePath = path.join(config.dataDir, file);
-      const stats = fs.statSync(filePath);
-      return {
-        filename: file,
-        createdAt: stats.birthtime,
-        size: stats.size
-      };
-    }).sort((a, b) => b.createdAt - a.createdAt);
-    
-    return results;
-  } catch (error) {
-    console.error('Erro ao listar resultados:', error.message);
-    throw error;
-  }
-};
-
-/**
- * Obtém um resultado específico pelo nome do arquivo
- * @param {string} filename Nome do arquivo
- * @returns {Object} Conteúdo do arquivo
- */
-export const getScrapingResult = (filename) => {
-  try {
-    const filePath = path.join(config.dataDir, filename);
-    
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`Arquivo '${filename}' não encontrado`);
-    }
-    
-    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return data;
-  } catch (error) {
-    console.error(`Erro ao obter resultado '${filename}':`, error.message);
-    throw error;
-  }
+export const convertCookiesToString = (cookies) => {
+  return cookies
+    .map(cookie => `${cookie.name}=${cookie.value}`)
+    .join('; ');
 };
 
 /**
