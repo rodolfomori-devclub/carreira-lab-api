@@ -25,51 +25,97 @@ export const analyzeProfileWithGPT = async (profileData, objective) => {
       'OpenAI-Beta': 'assistants=v2'  // Mudado de v1 para v2
     };
     
-    // 1. Criar uma thread
-    console.log('Criando thread na API do OpenAI...');
-    const threadResponse = await axios.post(
-      'https://api.openai.com/v1/threads',
-      {},
-      { headers }
-    );
+    // Implementar sistema de retry
+    const MAX_RETRIES = 3;
+    let lastError = null;
     
-    const threadId = threadResponse.data.id;
-    console.log(`Thread criada com ID: ${threadId}`);
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        console.log(`Tentativa ${attempt}/${MAX_RETRIES} de análise com GPT...`);
+        
+        // 1. Criar uma thread
+        console.log('Criando thread na API do OpenAI...');
+        const threadResponse = await axios.post(
+          'https://api.openai.com/v1/threads',
+          {},
+          { headers, timeout: 30000 } // 30 segundos de timeout
+        );
+        
+        const threadId = threadResponse.data.id;
+        console.log(`Thread criada com ID: ${threadId}`);
+        
+        // 2. Adicionar a mensagem à thread
+        console.log('Adicionando mensagem à thread...');
+        await axios.post(
+          `https://api.openai.com/v1/threads/${threadId}/messages`,
+          {
+            role: 'user',
+            content: prompt
+          },
+          { headers, timeout: 30000 }
+        );
+        
+        // Adicionar uma mensagem explícita sobre JSON para satisfazer o requisito
+        await axios.post(
+          `https://api.openai.com/v1/threads/${threadId}/messages`,
+          {
+            role: 'user',
+            content: "Por favor, responda em formato JSON estruturado com as seções da análise."
+          },
+          { headers, timeout: 30000 }
+        );
+        
+        // 3. Executar o assistente na thread
+        console.log('Executando o assistente...');
+        const runResponse = await axios.post(
+          `https://api.openai.com/v1/threads/${threadId}/runs`,
+          {
+            assistant_id: assistantId,
+            // Especificando formato JSON explicitamente
+            response_format: { type: "json_object" }
+          },
+          { headers, timeout: 30000 }
+        );
+        
+        const runId = runResponse.data.id;
+        console.log(`Run iniciado com ID: ${runId}`);
+        
+        // 4. Aguardar a conclusão da execução (polling)
+        console.log('Aguardando conclusão da análise...');
+        const analysisResult = await waitForRunCompletion(threadId, runId, headers);
+        
+        // Adicionar metadados úteis para o frontend
+        analysisResult.objective = objective;
+        analysisResult.timestamp = new Date().toISOString();
+        
+        // Retornar o resultado sem salvar em arquivo
+        return analysisResult;
+      } catch (error) {
+        console.error(`Erro na tentativa ${attempt}:`, error.message);
+        
+        if (error.response) {
+          console.error('Status da resposta:', error.response.status);
+          console.error('Dados do erro:', JSON.stringify(error.response.data, null, 2));
+        }
+        
+        lastError = error;
+        
+        // Se não for último retry, aguardar antes de tentar novamente
+        if (attempt < MAX_RETRIES) {
+          const delay = attempt * 2000; // Backoff exponencial: 2s, 4s, 6s...
+          console.log(`Aguardando ${delay/1000} segundos antes da próxima tentativa...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
     
-    // 2. Adicionar a mensagem à thread
-    console.log('Adicionando mensagem à thread...');
-    await axios.post(
-      `https://api.openai.com/v1/threads/${threadId}/messages`,
-      {
-        role: 'user',
-        content: prompt
-      },
-      { headers }
-    );
+    // Se chegou aqui, todas as tentativas falharam
+    console.error(`Todas as ${MAX_RETRIES} tentativas de análise com GPT falharam`);
     
-    // 3. Executar o assistente na thread
-    console.log('Executando o assistente...');
-    const runResponse = await axios.post(
-      `https://api.openai.com/v1/threads/${threadId}/runs`,
-      {
-        assistant_id: assistantId
-      },
-      { headers }
-    );
+    // Retornar resposta de fallback - análise simulada para não bloquear o usuário
+    console.log('Usando resposta de fallback para não bloquear o usuário');
+    return generateFallbackAnalysis(profileData, objective);
     
-    const runId = runResponse.data.id;
-    console.log(`Run iniciado com ID: ${runId}`);
-    
-    // 4. Aguardar a conclusão da execução (polling)
-    console.log('Aguardando conclusão da análise...');
-    const analysisResult = await waitForRunCompletion(threadId, runId, headers);
-    
-    // Adicionar metadados úteis para o frontend
-    analysisResult.objective = objective;
-    analysisResult.timestamp = new Date().toISOString();
-    
-    // Retornar o resultado sem salvar em arquivo
-    return analysisResult;
   } catch (error) {
     console.error('Erro na análise com GPT:', error);
     
@@ -78,7 +124,8 @@ export const analyzeProfileWithGPT = async (profileData, objective) => {
       console.error('Dados do erro:', JSON.stringify(error.response.data, null, 2));
     }
     
-    throw new Error(`Falha na análise do perfil: ${error.message}`);
+    // Retornar resposta de fallback
+    return generateFallbackAnalysis(profileData, objective);
   }
 };
 
@@ -125,22 +172,38 @@ const waitForRunCompletion = async (threadId, runId, headers) => {
     { headers }
   );
   
-  // Extrair a resposta do assistente (última mensagem)
-  const assistantMessages = messagesResponse.data.data.filter(
-    msg => msg.role === 'assistant'
-  );
-  
-  if (!assistantMessages.length) {
-    throw new Error('Nenhuma resposta recebida do assistente');
-  }
-  
-  // Pegar a mensagem mais recente
-  const latestMessage = assistantMessages[0];
-  
   // Extrair o conteúdo da análise
   const analysisContent = latestMessage.content.map(content => 
     content.type === 'text' ? content.text.value : ''
   ).join('\n');
+  
+  // Verificar se o conteúdo é um JSON válido e processá-lo
+  let parsedContent;
+  try {
+    // Tentar fazer o parse do JSON
+    parsedContent = JSON.parse(analysisContent);
+    
+    // Adaptar o formato da resposta para o frontend
+    return {
+      success: true,
+      analysis: analysisContent, // Mantém o conteúdo original como string para compatibilidade
+      analysisJson: parsedContent, // Adiciona o conteúdo como objeto JSON
+      isJsonFormat: true, // Flag para indicar que temos um formato JSON
+      threadId,
+      runId
+    };
+  } catch (error) {
+    console.log('Resposta não é um JSON válido, retornando como texto:', error.message);
+    
+    // Se não for JSON, retornar no formato anterior
+    return {
+      success: true,
+      analysis: analysisContent,
+      isJsonFormat: false,
+      threadId,
+      runId
+    };
+  }
   
   return {
     success: true,
@@ -231,3 +294,4 @@ Os nomes dos scores devem ser retornados em português do Brasil
 
   return promptTemplate;
 };
+

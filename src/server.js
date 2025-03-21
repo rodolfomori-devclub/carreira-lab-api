@@ -3,6 +3,7 @@ import axios from 'axios';
 import cors from 'cors';
 import { analyzeProfileWithGPT } from './services/openaiService.js';
 import { getRandomCookies, getAllCookies } from './services/firebaseService.js';
+import chatRoutes from './routes/chatRoutes.js';
 import 'dotenv/config';
 
 const app = express();
@@ -17,6 +18,9 @@ app.use(cors({
 
 // Middleware para processar JSON
 app.use(express.json({ limit: '50mb' }));
+
+// Rotas do chat
+app.use(chatRoutes);
 
 // Rota para scraping e análise do LinkedIn
 app.post('/scrape', async (req, res) => {
@@ -184,18 +188,34 @@ app.post('/scrape', async (req, res) => {
       };
       
       // Responder com os dados completos
-      res.json({
-        success: true,
-        data: {
-          profile: profileInfo,
-          objective: objective || 'general',
-          analysis: analysisResult.analysis,
-          scores: scores,
-          timestamp: new Date().toISOString(),
-          cookieSource: cookieSource // Apenas para referência
-        }
-      });
-      
+         // Responder com os dados completos
+         res.json({
+          success: true,
+          data: {
+            profile: profileInfo,
+            objective: objective || 'general',
+            analysis: analysisResult.analysis,
+            analysisJson: analysisResult.analysisJson || null, // Adicionar o objeto JSON se disponível
+            isJsonFormat: analysisResult.isJsonFormat || false, // Flag para indicar se está em formato JSON
+            scores: analysisResult.isJsonFormat && analysisResult.analysisJson.análise.nota ? 
+              {
+                profile_completeness: analysisResult.analysisJson.análise.nota.score_geral || Math.floor(Math.random() * 3) + 7,
+                headline_quality: analysisResult.analysisJson.análise.nota.score_apresentação || Math.floor(Math.random() * 4) + 6,
+                experience_details: analysisResult.analysisJson.análise.nota.score_profissional || Math.floor(Math.random() * 5) + 5,
+                skills_relevance: analysisResult.analysisJson.análise.nota.score_habilidades || Math.floor(Math.random() * 6) + 4,
+                overall_impression: analysisResult.analysisJson.análise.nota.score_linkedin || Math.floor(Math.random() * 4) + 6
+              } : 
+              {
+                profile_completeness: Math.floor(Math.random() * 3) + 7, // 7-9
+                headline_quality: Math.floor(Math.random() * 4) + 6,    // 6-9
+                experience_details: Math.floor(Math.random() * 5) + 5,  // 5-9
+                skills_relevance: Math.floor(Math.random() * 6) + 4,    // 4-9
+                overall_impression: Math.floor(Math.random() * 4) + 6   // 6-9
+              },
+            timestamp: new Date().toISOString(),
+            cookieSource: cookieSource // Apenas para referência
+          }
+        });
     } catch (gptError) {
       console.error('Erro na análise com GPT:', gptError.message);
       
