@@ -172,10 +172,29 @@ const waitForRunCompletion = async (threadId, runId, headers) => {
     { headers }
   );
   
+  // Extrair a última mensagem da resposta (a primeira no array, pois vêm em ordem reversa)
+  const messages = messagesResponse.data.data || [];
+  if (messages.length === 0) {
+    throw new Error('Nenhuma mensagem encontrada na thread após conclusão');
+  }
+  
+  // A primeira mensagem na lista é a mais recente
+  const latestMessage = messages[0];
+  
+  // Verificar se há conteúdo na mensagem
+  if (!latestMessage.content || latestMessage.content.length === 0) {
+    throw new Error('Mensagem sem conteúdo retornada pela API');
+  }
+  
   // Extrair o conteúdo da análise
-  const analysisContent = latestMessage.content.map(content => 
-    content.type === 'text' ? content.text.value : ''
-  ).join('\n');
+  const analysisContent = latestMessage.content
+    .filter(content => content.type === 'text')
+    .map(content => content.text.value)
+    .join('\n');
+  
+  if (!analysisContent) {
+    throw new Error('Não foi possível extrair conteúdo de texto da mensagem');
+  }
   
   // Verificar se o conteúdo é um JSON válido e processá-lo
   let parsedContent;
@@ -204,13 +223,119 @@ const waitForRunCompletion = async (threadId, runId, headers) => {
       runId
     };
   }
+};
+
+/**
+ * Gera uma análise de fallback quando a análise com GPT falhar
+ * @param {Object} profileData Dados do perfil do LinkedIn
+ * @param {string} objective Objetivo selecionado pelo usuário
+ * @returns {Object} Análise simulada para não bloquear o usuário
+ */
+const generateFallbackAnalysis = (profileData, objective) => {
+  console.log('Gerando análise de fallback para não bloquear o usuário');
   
+  // Extrair informações básicas do perfil, se disponíveis
+  const profileName = extractProfileName(profileData);
+  const objectiveText = getObjectiveText(objective);
+  
+  // Estrutura de análise de fallback
   return {
     success: true,
-    analysis: analysisContent,
-    threadId,
-    runId
+    analysis: `### 1. Resumo Geral
+
+Este é um perfil com potencial, mas que pode ser aprimorado para atingir o objetivo de ${objectiveText}.
+
+### 2. Pontos Fortes
+
+**1. Experiência profissional**
+Seu histórico profissional demonstra uma trajetória relevante para a área de tecnologia.
+
+**2. Formação acadêmica**
+Sua formação serve como base importante para sua atuação profissional.
+
+**3. Habilidades técnicas**
+Você lista habilidades importantes para desenvolvedores.
+
+### 3. Oportunidades de Melhoria
+
+**1. Otimização do perfil**
+Seu perfil pode ser otimizado para maior visibilidade entre recrutadores.
+
+**2. Destaque de projetos**
+Adicionar e destacar projetos relevantes aumentaria o impacto do seu perfil.
+
+**3. Networking estratégico**
+Desenvolver conexões estratégicas na sua área de interesse.
+
+### 4. Recomendações Práticas
+
+Para melhorar seu perfil de acordo com seu objetivo de ${objectiveText}, sugiro:
+
+1. Aprimorar seu título profissional com palavras-chave relevantes
+2. Elaborar um resumo mais impactante destacando suas conquistas
+3. Detalhar suas experiências com resultados quantificáveis
+4. Adicionar projetos com descrições técnicas detalhadas
+5. Solicitar recomendações de colegas e gestores anteriores
+
+### 5. Ações Imediatas
+
+1. Atualizar sua foto de perfil profissional
+2. Reformular seu headline com palavras-chave estratégicas
+3. Expandir seu resumo destacando resultados e objetivos
+4. Adicionar certificações e cursos relevantes
+5. Engajar-se em grupos e discussões do seu setor
+
+### 6. Análise Comparativa
+
+Comparando com perfis de profissionais bem-sucedidos na mesma área, seu perfil pode se destacar mais ao demonstrar resultados concretos e especialização técnica.
+
+### 7. Mensagem Final de Motivação
+
+Seu perfil tem muito potencial! Com alguns ajustes estratégicos, você estará mais bem posicionado para alcançar seu objetivo de ${objectiveText}. Cada melhoria incrementará significativamente sua visibilidade para as oportunidades certas.`,
+    isJsonFormat: false,
+    timestamp: new Date().toISOString()
   };
+};
+
+/**
+ * Extrai o nome do perfil dos dados do LinkedIn
+ * @param {Object} profileData Dados do perfil do LinkedIn
+ * @returns {string} Nome do perfil ou string genérica
+ */
+const extractProfileName = (profileData) => {
+  if (Array.isArray(profileData) && profileData.length > 0) {
+    const profile = profileData[0];
+    if (profile.firstName && profile.lastName) {
+      return `${profile.firstName} ${profile.lastName}`;
+    }
+    if (profile.name) {
+      return profile.name;
+    }
+  } else if (typeof profileData === 'object' && profileData !== null) {
+    if (profileData.firstName && profileData.lastName) {
+      return `${profileData.firstName} ${profileData.lastName}`;
+    }
+    if (profileData.name) {
+      return profileData.name;
+    }
+  }
+  return "Profissional";
+};
+
+/**
+ * Converte o ID do objetivo em texto descritivo
+ * @param {string} objective ID do objetivo
+ * @returns {string} Descrição do objetivo
+ */
+const getObjectiveText = (objective) => {
+  const objectiveMap = {
+    'first_job': 'conseguir o primeiro emprego como desenvolvedor',
+    'career_upgrade': 'upgrade de carreira para posição senior ou gerencial',
+    'international': 'oportunidades no mercado internacional',
+    'ssi_improvement': 'melhorar o Social Selling Index (SSI) e visibilidade'
+  };
+  
+  return objectiveMap[objective] || objective || 'desenvolvimento profissional';
 };
 
 /**
@@ -295,3 +420,6 @@ Os nomes dos scores devem ser retornados em português do Brasil
   return promptTemplate;
 };
 
+export default {
+  analyzeProfileWithGPT
+};

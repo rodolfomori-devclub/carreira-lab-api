@@ -18,15 +18,15 @@ export default {
   
   // Apify API
   apify: {
-    apiEndpoint: 'https://api.apify.com/v2/acts/curious_coder~linkedin-profile-scraper/run-sync-get-dataset-items',
-    apiToken: 'apify_api_He4ovzomMQqpy7iIW4nnZZdFPXacCn3QrwXj',
+    apiEndpoint: process.env.APIFY_API_ENDPOINT,
+    apiToken: process.env.APIFY_API_TOKEN,
     timeout: 120000 // 2 minutos
   },
   
   // OpenAI API
   openai: {
-    apiKey: process.env.OPENAI_API_KEY || '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', // Usar variável de ambiente em produção
-    assistantId: 'asst_USPgvDfuLQtJJRFMnasNAotC',
+    apiKey: process.env.OPENAI_API_KEY, // Usar variável de ambiente em produção
+    assistantId: process.env.OPENAI_ASSISTANT_ID,
     timeout: 180000 // 3 minutos
   }
 };

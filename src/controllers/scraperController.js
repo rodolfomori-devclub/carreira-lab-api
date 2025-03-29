@@ -108,7 +108,7 @@ export const scrapeProfile = async (req, res) => {
     // 1. Realizar o scraping do perfil LinkedIn
     console.log(`Iniciando scraping para: ${profileUrl}`);
     const scrapingResult = await scrapeLinkedInProfile(profileUrl);
-    
+
     // 2. Analisar o perfil com GPT
     console.log(`Iniciando análise do perfil com GPT para objetivo: ${objective}`);
     const analysis = await analyzeProfileWithGPT(scrapingResult.data, objective);
