@@ -11,7 +11,7 @@ import config from '../config/index.js';
 export const analyzeProfileWithGPT = async (profileData, objective) => {
   try {
     // Definir o ID do assistente
-    const assistantId = 'asst_USPgvDfuLQtJJRFMnasNAotC';
+    const assistantId = process.env.OPENAI_ASSISTANT_ID;
     
     console.log(`Iniciando análise com GPT para objetivo: ${objective}`);
     
@@ -196,11 +196,15 @@ const waitForRunCompletion = async (threadId, runId, headers) => {
     throw new Error('Não foi possível extrair conteúdo de texto da mensagem');
   }
   
+
   // Verificar se o conteúdo é um JSON válido e processá-lo
   let parsedContent;
   try {
     // Tentar fazer o parse do JSON
+    console.log('analysisContent', analysisContent)
+
     parsedContent = JSON.parse(analysisContent);
+    console.log('parsedContent', parsedContent)
     
     // Adaptar o formato da resposta para o frontend
     return {
